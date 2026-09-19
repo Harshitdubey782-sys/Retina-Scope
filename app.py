@@ -1006,31 +1006,44 @@ def normalize_name(series):
         .str.strip()
     )
 
-@st.cache_data
-def build_map_data():
+@st.cache_data(show_spinner=False)
+def build_map_data(selected_state="All States"):
     planning = load_planning_data().copy()
     shapes = load_district_shapes().copy()
 
-    # Exact fields in the downloaded district shapefile:
-    # statename, distname, distcode, geometry
+    # Normalize names for a robust state + district join.
     shapes["_state_key"] = normalize_name(shapes["statename"])
     shapes["_district_key"] = normalize_name(shapes["distname"])
 
     planning["_state_key"] = normalize_name(planning["state"])
     planning["_district_key"] = normalize_name(planning["district"])
 
-    # State + district is safer than district alone because some names repeat.
+    # IMPORTANT: filter before the merge so the browser receives only the
+    # selected state's geometries instead of the complete India shapefile.
+    if selected_state != "All States":
+        state_key = normalize_name(pd.Series([selected_state])).iloc[0]
+        shapes = shapes[shapes["_state_key"] == state_key].copy()
+        planning = planning[planning["_state_key"] == state_key].copy()
+
     merged = shapes.merge(
         planning,
         on=["_state_key", "_district_key"],
-        how="left",
+        how="inner",
         suffixes=("_shape", "_plan")
     )
 
-    # Keep only districts for which planning data exists.
     merged = merged.dropna(subset=["priority"]).copy()
-    merged["map_id"] = merged.index.astype(str)
 
+    if merged.empty:
+        return merged
+
+    # Reduce geometry complexity for much faster Plotly rendering.
+    merged["geometry"] = merged.geometry.simplify(
+        tolerance=0.005,
+        preserve_topology=True
+    )
+
+    merged["map_id"] = merged.index.astype(str)
     return merged
 
 
@@ -1713,22 +1726,57 @@ else:
                 f"{int(filtered['priority'].isin(['High', 'Critical']).sum()):,}"
             )
 
+        # ---------------- TABLE ----------------
+        # Render the planning table BEFORE the map so district data remains
+        # immediately visible even if browser-side map rendering is slow.
+        st.markdown("#### Priority Districts")
+
+        table = filtered[
+            [
+                "state",
+                "district",
+                "estimated_annual_screening_demand",
+                "estimated_screening_capacity",
+                "capacity_gap",
+                "priority",
+            ]
+        ].sort_values(
+            "capacity_gap",
+            ascending=False
+        )
+
+        st.dataframe(
+            table.rename(columns={
+                "state": "State",
+                "district": "District",
+                "estimated_annual_screening_demand": "Annual Demand",
+                "estimated_screening_capacity": "Capacity",
+                "capacity_gap": "Capacity Gap",
+                "priority": "Priority",
+            }),
+            use_container_width=True,
+            hide_index=True,
+        )
+
         # ---------------- MAP ----------------
         try:
-            map_df = build_map_data()
-
-            if selected_state != "All States":
-                map_df = map_df[map_df["state"] == selected_state]
+            map_df = build_map_data(selected_state)
 
             if selected_priority != "All Priorities":
-                map_df = map_df[map_df["priority"] == selected_priority]
+                map_df = map_df[
+                    map_df["priority"] == selected_priority
+                ].copy()
 
-            if len(map_df) > 0:
+            if not map_df.empty:
                 geojson = map_df.__geo_interface__
 
-                # Discrete priority categories make the planning map
-                # immediately understandable during a demo.
-                priority_order = ["Low", "Moderate", "High", "Critical"]
+                priority_order = [
+                    "Low",
+                    "Moderate",
+                    "High",
+                    "Critical"
+                ]
+
                 map_df["priority"] = pd.Categorical(
                     map_df["priority"],
                     categories=priority_order,
@@ -1770,11 +1818,11 @@ else:
                 fig.update_geos(
                     fitbounds="locations",
                     visible=False,
-                    bgcolor="rgba(0,0,0,0)"
+                    bgcolor="rgba(0,0,0,0)",
                 )
 
                 fig.update_layout(
-                    height=560,
+                    height=520,
                     margin=dict(l=0, r=0, t=10, b=0),
                     paper_bgcolor="rgba(0,0,0,0)",
                     plot_bgcolor="rgba(0,0,0,0)",
@@ -1792,45 +1840,18 @@ else:
                 st.plotly_chart(
                     fig,
                     use_container_width=True,
-                    config={"displayModeBar": False}
+                    config={
+                        "displayModeBar": False,
+                        "responsive": True,
+                    },
                 )
             else:
                 st.info("No mapped districts match the selected filters.")
 
         except Exception as map_error:
             st.warning(
-                "District map could not be loaded. The planning table is still available."
+                f"District map unavailable: {map_error}"
             )
-
-        # ---------------- TABLE ----------------
-        st.markdown("#### Priority Districts")
-
-        table = filtered[
-            [
-                "state",
-                "district",
-                "estimated_annual_screening_demand",
-                "estimated_screening_capacity",
-                "capacity_gap",
-                "priority",
-            ]
-        ].sort_values(
-            "capacity_gap",
-            ascending=False
-        )
-
-        st.dataframe(
-            table.rename(columns={
-                "state": "State",
-                "district": "District",
-                "estimated_annual_screening_demand": "Annual Demand",
-                "estimated_screening_capacity": "Capacity",
-                "capacity_gap": "Capacity Gap",
-                "priority": "Priority",
-            }),
-            use_container_width=True,
-            hide_index=True,
-        )
 
         st.caption(
             "Planning estimates are prototype assumptions derived from "
