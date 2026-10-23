@@ -16,5 +16,4 @@ streamlit-folium
 geopandas
 shapely
 pyproj
-fiona
 reportlab
